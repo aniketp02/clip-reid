@@ -30,6 +30,14 @@ def do_train_stage1(cfg,
             print('Using {} GPUs for training'.format(torch.cuda.device_count()))
             model = nn.DataParallel(model)  
 
+    # Load checkpoint if exists
+    start_epoch = 1
+    max_epoch_checkpoint = os.path.join(cfg.OUTPUT_DIR, cfg.MODEL.NAME + '_stage1_{}.pth'.format(epochs))
+    if os.path.exists(max_epoch_checkpoint):
+        model.load_state_dict(torch.load(max_epoch_checkpoint))
+        logger.info(f"Loaded model checkpoint from {max_epoch_checkpoint}")
+        return
+
     loss_meter = AverageMeter()
     scaler = amp.GradScaler()
     xent = SupConLoss(device)
@@ -59,24 +67,24 @@ def do_train_stage1(cfg,
     del labels, image_features
     
 
-    for epoch in range(1, epochs + 1):
+    for epoch in range(start_epoch, epochs + 1):
         loss_meter.reset()
         scheduler.step(epoch)
         model.train()
 
         iter_list = torch.randperm(num_image).to(device)
-        for i in range(i_ter+1):
+        for i in range(i_ter + 1):
             optimizer.zero_grad()
             if i != i_ter:
-                b_list = iter_list[i*batch:(i+1)* batch]
+                b_list = iter_list[i * batch:(i + 1) * batch]
             else:
-                b_list = iter_list[i*batch:num_image]
+                b_list = iter_list[i * batch:num_image]
             
             target = labels_list[b_list]
             image_features = image_features_list[b_list]
             with amp.autocast(enabled=True):
                 # text_features = model(label = target, get_text = True) 
-                text_features = model(x=image_features,label = target, get_text = True)
+                text_features = model(x=image_features, label=target, get_text=True)
             loss_i2t = xent(image_features, text_features, target, target)
             loss_t2i = xent(text_features, image_features, target, target)
 
@@ -94,16 +102,11 @@ def do_train_stage1(cfg,
                 logger.info("Epoch[{}] Iteration[{}/{}] Loss: {:.3f}, Base Lr: {:.2e}"
                             .format(epoch, (i + 1), len(train_loader_stage1),
                                     loss_meter.avg, scheduler._get_lr(epoch)[0]))
-                wandb.log({"Stage1 Loss":loss_meter.avg, "Stage1 Base LR": scheduler._get_lr(epoch)[0]})
+                wandb.log({"Stage1 Loss": loss_meter.avg, "Stage1 Base LR": scheduler._get_lr(epoch)[0]})
 
         if epoch % checkpoint_period == 0:
-            if cfg.MODEL.DIST_TRAIN:
-                if dist.get_rank() == 0:
-                    torch.save(model.state_dict(),
-                               os.path.join(cfg.OUTPUT_DIR, cfg.MODEL.NAME + '_stage1_{}.pth'.format(epoch)))
-            else:
-                torch.save(model.state_dict(),
-                           os.path.join(cfg.OUTPUT_DIR, cfg.MODEL.NAME + '_stage1_{}.pth'.format(epoch)))
+            torch.save(model.state_dict(),
+                       os.path.join(cfg.OUTPUT_DIR, cfg.MODEL.NAME + '_stage1_{}.pth'.format(epoch)))
 
     all_end_time = time.monotonic()
     total_time = timedelta(seconds=all_end_time - all_start_time)

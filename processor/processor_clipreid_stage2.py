@@ -76,6 +76,7 @@ def do_train_stage2(cfg,
         loss_meter.reset()
         acc_meter.reset()
         evaluator.reset()
+        uncertianties = 0
 
         scheduler.step()
 
@@ -96,7 +97,7 @@ def do_train_stage2(cfg,
             with amp.autocast(enabled=True):
                 score, feat, image_features = model(x = img, label = target, cam_label=target_cam, view_label=target_view)
                 logits = image_features @ text_features.t()
-                loss = loss_fn(score, feat, target, target_cam, logits)
+                loss = loss_fn(score, feat, target, target_cam, logits, uncertianties)
 
             scaler.scale(loss).backward()
 
