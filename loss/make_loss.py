@@ -1,5 +1,10 @@
 # make_loss.py
 
+"""
+Visual grounding - Text image attention, transformer based
+"""
+
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -9,46 +14,46 @@ from .center_loss import CenterLoss
 import wandb
 
 MARGIN = 0.5
-MARGIN_LOSS_WEIGHT = 6
-TAU = 0.1
+MARGIN_LOSS_WEIGHT = 0.05
+TAU = 0.99
+LAMBDA_ENTROPY = 0.005
+
 UNCERTAINITIES = 0
 
 class MarginLoss(nn.Module):
     #TODO: Calculate the uncertainities count correctly
-    def __init__(self, tau=0.5):
+    def __init__(self, tau=0.5, lambda_entropy=0.1):
         super(MarginLoss, self).__init__()
         self.tau = tau
+        self.lambda_entropy = lambda_entropy
 
     def forward(self, logits, uncertianties):
-        print("shape of logits", len(logits), logits[0].shape, logits[1].shape)
         if isinstance(logits, list):
             margin_losses = [self.calculate_margin_loss(logit, uncertianties) for logit in logits]
             margin_loss, uncertainties = zip(*margin_losses)
             margin_loss = list(margin_loss)
             uncertainties = list(uncertainties)
 
-            print("margin losses", margin_losses, margin_losses[0])
             return sum(margin_loss) / len(margin_loss), sum(uncertainties) / len(uncertainties)
         else:
             return self.calculate_margin_loss(logits, uncertianties)
 
     def calculate_margin_loss(self, logits, uncertianties):
         probs = F.softmax(logits, dim=1)
-        print("\n PROBS are ", probs)
-        print("\n SUM OR PROBS", torch.sum(probs[0]))
-        known_probs, _ = torch.max(probs[:, :-1], dim=1)
+        known_probs = torch.sum(probs[:, :-1], dim=1)
         unknown_prob = probs[:, -1]
         margin = known_probs - unknown_prob
         uncertianties += (margin < self.tau).sum().item()
 
-        # print("\nUnknow Probabilities", unknown_prob)
-        # print("\n\nKnown Probabilities", known_probs)
+        # Calculate entropy
+        entropy = -torch.sum(probs * torch.log(probs + 1e-6), dim=1).mean()
+
+        wandb.log({"entropy": entropy})
         wandb.log({"margin": margin})
         margin_loss = torch.mean(F.relu(self.tau - margin))
-        # if margin_loss > 0:
-        #     # self.uncertainities_count += 1
-        #     wandb.log({"Uncertainities count": uncertianties, "Unknow Probs": unknown_prob, "Known Probs": known_probs})
-        return margin_loss, uncertianties
+        total_loss = margin_loss + self.lambda_entropy * entropy
+
+        return total_loss, uncertianties
 
 def make_loss(cfg, num_classes):    
     sampler = cfg.DATALOADER.SAMPLER
@@ -69,7 +74,8 @@ def make_loss(cfg, num_classes):
         xent = CrossEntropyLabelSmooth(num_classes=num_classes)
         print("label smooth on, numclasses:", num_classes)
 
-    margin_loss = MarginLoss(tau=TAU)  
+    margin_loss = MarginLoss(tau=TAU, lambda_entropy=LAMBDA_ENTROPY)
+    print(f"\nTAU: {TAU}\nMARGIN: {MARGIN}\nMARGIN_LOSS_WEIGHT: {MARGIN_LOSS_WEIGHT}\nLAMBDA_ENTROPY: {LAMBDA_ENTROPY}\n")
 
     if sampler == 'softmax':
         def loss_func(score, feat, target):
@@ -96,15 +102,11 @@ def make_loss(cfg, num_classes):
                     if i2tscore is not None:
                         I2TLOSS = xent(i2tscore, target)
                         loss = cfg.MODEL.I2T_LOSS_WEIGHT * I2TLOSS + loss
-                        print("I2T Loss", I2TLOSS)
 
-                    # print(type(score), type(target))
                     margin_loss_value, uncertainties_count = margin_loss(score, uncertianties)
                     wandb.log({"Margin Loss Value": margin_loss_value, "loss value": loss, "Uncertainities count": uncertainties_count})
-                    print("Margin Loss", margin_loss_value)
                     loss += MARGIN_LOSS_WEIGHT * margin_loss_value
                     wandb.log({"loss + margin (weighted)": loss})
-                    #TODO: Return margin loss along with the loss, make sure that the loss is combined so that loss.backward() works and you'll get magin loss per iteration, get the anomalies per iteration
                     return loss
                 else:
                     if isinstance(score, list):
@@ -127,7 +129,6 @@ def make_loss(cfg, num_classes):
 
                     margin_loss_value, uncertainties_count = margin_loss(score, uncertianties)
                     wandb.log({"Margin Loss Value": margin_loss_value, "loss value": loss, "Uncertainities count": uncertainties_count})
-                    print("Margin Loss", margin_loss_value)
                     loss += MARGIN_LOSS_WEIGHT * margin_loss_value
 
                     return loss
